@@ -3686,3 +3686,4 @@ def dgated_gelu(inputs: jnp.ndarray, gelu_inputs: jnp.ndarray) -> jnp.ndarray:
     Return dgeglu(inputs)
     """
     return DgatedGeluPrimitive.outer_primitive.bind(inputs, gelu_inputs)
+
