@@ -83,7 +83,7 @@ def jax_dtype_to_te_dtype(jax_dtype):
     if jax_dtype == jnp.float16:
         return TEDType.kFloat16
     if jax_dtype == jnp.bfloat16:
-        return TEDType.kBFloat16i
+        return TEDType.kBFloat16
     if jax_dtype == jnp.float8_e4m3fn:
         return TEDType.kFloat8E4M3
     if jax_dtype == jnp.float8_e5m2:
@@ -3410,7 +3410,7 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         ir_amax_shape = ir_amax_type.shape
         ir_scale_shape = ir_amax_shape
         ir_scale_inv_shape = ir_amax_shape
-        transposed_x_shape = TransposePrimitive.multidim_transpose(gi_shape, static_axis_boundary)
+        transposed_x_shape = DgatedGeluCastTransposePrimitive.multidim_transpose(gi_shape, static_axis_boundary)
         out_types = [
             ir.RankedTensorType.get(gi_shape, ir_out_dtype),
             ir.RankedTensorType.get(transposed_x_shape, ir_out_dtype),
@@ -3419,8 +3419,8 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         operands = [dz, x, amax, scale, scale_inv]
         operand_shapes = [ir_in_shape, gi_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-        opaque = transformer_engine_jax.pack_common_descriptor((ir_in_shape),
+        contracted_x_shape = (reduce(operator.mul, gi_shape[:-1]), gi_shape[-1])
+        opaque = transformer_engine_jax.pack_common_descriptor(contracted_x_shape,
                                                                jax_dtype_to_te_dtype(in_aval.dtype),
                                                                jax_dtype_to_te_dtype(out_dtype))
 
@@ -3465,7 +3465,7 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
             scale,
             scale_inv,
             out_dtype=out_dtype,
-            static_axis_boundary=static_axis_boundary), out_bdims
+            static_axis_boundary=x_bdim), out_bdims
 
     @staticmethod
     def infer_sharding_from_operands(out_dtype, static_axis_boundary, mesh, arg_infos, result_infos):
@@ -3485,16 +3485,13 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
     def partition(out_dtype, static_axis_boundary, mesh, arg_infos, result_infos):
         del result_infos
         x_spec = get_padded_spec(arg_infos[0])
-        if x_spec[-1] is not None:
-            warnings.warn(
-                f"Does not support to shard hidden dim in {DgatedGeluCastTransposePrimitive.name}! " \
-                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
-                f"and hurt performance."
-            )
-        x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
+        casted_x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        xt_spec = DgatedGeluCastTransposePrimitive.multidim_transpose(x_spec, static_axis_boundary)
+        casted_transposed_x_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
+
         amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
-        out_shardings = (x_sharding, x_sharding, amax_sharding)
+        out_shardings = (casted_x_sharding, casted_transposed_x_sharding, amax_sharding)
 
         def sharded_impl(dz, x, amax, scale, scale_inv):
             local_out, local_t_out, local_amax = DgatedGeluCastTransposePrimitive.impl(dz, x, amax, scale, scale_inv,
